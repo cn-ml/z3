@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import os
 import sys
 import shutil
@@ -6,6 +7,7 @@ import subprocess
 import multiprocessing
 import re
 import glob
+from typing import Iterable, List, Optional
 from setuptools import setup
 from distutils.util import get_platform
 from distutils.errors import LibError
@@ -26,23 +28,59 @@ SRC_DIR_LOCAL = os.path.join(ROOT_DIR, 'core')
 SRC_DIR_REPO = os.path.join(ROOT_DIR, '..', '..', '..')
 SRC_DIR = SRC_DIR_LOCAL if os.path.exists(SRC_DIR_LOCAL) else SRC_DIR_REPO
 
+@dataclass
+class BuildInfo:
+    BUILD_DIR: str
+    HEADER_DIRS: List[str]
+    BUILD_PLATFORM: str
+
+@dataclass
+class ReleaseMetadata:
+    Version: str
+    Platform: str
+    Os: str
+    OsVersion: Optional[str]
+
+@dataclass
+class ReleaseInfo(BuildInfo):
+    RELEASE_DIR: str
+    RELEASE_METADATA: ReleaseMetadata
+
 # determine where binaries are
-RELEASE_DIR = os.environ.get('PACKAGE_FROM_RELEASE', None)
-if RELEASE_DIR is None:
-    BUILD_DIR = os.path.join(SRC_DIR, 'build') # implicit in configure script
-    HEADER_DIRS = [os.path.join(SRC_DIR, 'src', 'api'), os.path.join(SRC_DIR, 'src', 'api', 'c++')]
-    RELEASE_METADATA = None
-    BUILD_PLATFORM = sys.platform
-else:
-    if not os.path.isdir(RELEASE_DIR):
-        raise Exception("RELEASE_DIR (%s) is not a directory!" % RELEASE_DIR)
-    BUILD_DIR = os.path.join(RELEASE_DIR, 'bin')
-    HEADER_DIRS = [os.path.join(RELEASE_DIR, 'include')]
-    RELEASE_METADATA = os.path.basename(RELEASE_DIR).split('-')
-    if RELEASE_METADATA[0] != 'z3' or len(RELEASE_METADATA) not in (4, 5):
-        raise Exception("RELEASE_DIR (%s) must be in the format z3-version-arch-os[-osversion] so we can extract metadata from it. Sorry!" % RELEASE_DIR)
-    RELEASE_METADATA.pop(0)
-    BUILD_PLATFORM = RELEASE_METADATA[2]
+def get_build_info():
+    release_dir = os.environ.get('PACKAGE_FROM_RELEASE', None)
+    if release_dir is None:
+        return BuildInfo(
+            BUILD_DIR=os.path.join(SRC_DIR, 'build'), # implicit in configure script
+            HEADER_DIRS=[os.path.join(SRC_DIR, 'src', 'api'), os.path.join(SRC_DIR, 'src', 'api', 'c++')],
+            BUILD_PLATFORM=sys.platform
+        )
+    else:
+        if not os.path.isdir(release_dir):
+            raise Exception("RELEASE_DIR (%s) is not a directory!" % release_dir)
+        def extract_metadata(release_name: str):
+            metadata = release_name.split('-')
+            if len(metadata) not in (4, 5) or metadata[0] != 'z3':
+                raise Exception("Release name (%s) must be in the format z3-version-arch-os[-osversion] so we can extract metadata from it. Sorry!" % release_name)
+            metadata.pop(0)
+            return ReleaseMetadata(
+                Version=metadata[0],
+                Platform=metadata[1],
+                Os=metadata[2],
+                OsVersion=metadata[3] if 3 < len(metadata) else None
+            )
+        RELEASE_METADATA = extract_metadata(os.path.basename(release_dir))
+        return ReleaseInfo(
+            BUILD_DIR=os.path.join(release_dir, 'bin'),
+            HEADER_DIRS=[os.path.join(release_dir, 'include')],
+            BUILD_PLATFORM=RELEASE_METADATA.Platform,
+            RELEASE_DIR=release_dir,
+            RELEASE_METADATA=RELEASE_METADATA
+        )
+info = get_build_info()
+BUILD_DIR = info.BUILD_DIR
+HEADER_DIRS = info.HEADER_DIRS
+BUILD_PLATFORM = info.BUILD_PLATFORM
 
 # determine where destinations are
 LIBS_DIR = os.path.join(ROOT_DIR, 'z3', 'lib')
@@ -50,17 +88,17 @@ HEADERS_DIR = os.path.join(ROOT_DIR, 'z3', 'include')
 BINS_DIR = os.path.join(ROOT_DIR, 'bin')
 
 # determine platform-specific filenames
-if BUILD_PLATFORM in ('darwin', 'osx'):
+if info.BUILD_PLATFORM in ('darwin', 'osx'):
     LIBRARY_FILE = "libz3.dylib"
     EXECUTABLE_FILE = "z3"
-elif BUILD_PLATFORM in ('win32', 'cygwin', 'win'):
+elif info.BUILD_PLATFORM in ('win32', 'cygwin', 'win'):
     LIBRARY_FILE = "libz3.dll"
     EXECUTABLE_FILE = "z3.exe"
 else:
     LIBRARY_FILE = "libz3.so"
     EXECUTABLE_FILE = "z3"
 
-def rmtree(tree):
+def rmtree(tree: str):
     if os.path.exists(tree):
         shutil.rmtree(tree, ignore_errors=False)
 
@@ -80,17 +118,17 @@ def _clean_native_build():
 
 def _z3_version():
     post = os.getenv('Z3_VERSION_SUFFIX', '')
-    if RELEASE_DIR is None:
+    if not isinstance(info, ReleaseInfo):
         fn = os.path.join(SRC_DIR, 'scripts', 'mk_project.py')
         if os.path.exists(fn):
             with open(fn) as f:
                 for line in f:
                     n = re.match(r".*set_version\((.*), (.*), (.*), (.*)\).*", line)
                     if not n is None:
-                        return n.group(1) + '.' + n.group(2) + '.' + n.group(3) + '.' + n.group(4) + post
+                        return str(n.group(1) + '.' + n.group(2) + '.' + n.group(3) + '.' + n.group(4) + post)
         return "?.?.?.?"
     else:
-        version = RELEASE_METADATA[0]
+        version = info.RELEASE_METADATA.Version
         if version.count('.') == 2:
             version += '.0'
         return version + post
@@ -138,7 +176,7 @@ def _configure_z3():
             if val == "TRUE" or val == "FALSE":
                 cmake_options[key] = val
                 
-    cmake_args = [ '-D' + key + '=' + value for key,value in cmake_options.items() ]
+    cmake_args = [ '-D' + key + '=' + str(value) for key,value in cmake_options.items() ]
     args = [ 'cmake', *cmake_args, SRC_DIR ]
     if subprocess.call(args, env=build_env, cwd=BUILD_DIR) != 0:
         raise LibError("Unable to configure Z3.")
@@ -191,9 +229,9 @@ def _copy_bins():
     # @TODO: Linked issue: https://github.com/Z3Prover/z3/issues/5926
     major_minor = '.'.join(_z3_version().split('.')[:2])
     link_name = None
-    if BUILD_PLATFORM in ('win32', 'cygwin', 'win'):
+    if info.BUILD_PLATFORM in ('win32', 'cygwin', 'win'):
         pass # TODO: When windows VMs work on M1, fill this in
-    elif BUILD_PLATFORM in ('darwin', 'osx'):
+    elif info.BUILD_PLATFORM in ('darwin', 'osx'):
         split = LIBRARY_FILE.split('.')
         link_name = split[0] + '.' + major_minor + '.' + split[1]
     else:
@@ -216,7 +254,7 @@ def _copy_sources():
     shutil.copytree(os.path.join(SRC_DIR_REPO, 'scripts'), os.path.join(SRC_DIR_LOCAL, 'scripts'))
 
     # Copy in src, but avoid recursion
-    def ignore_python_setup_files(src, _):
+    def ignore_python_setup_files(src: str, _: List[str]) -> Iterable[str]:
         if os.path.normpath(src).endswith('api/python'):
             return ['core', 'dist', 'MANIFEST', 'MANIFEST.in', 'setup.py', 'z3_solver.egg-info']
         return []
@@ -225,7 +263,7 @@ def _copy_sources():
 
 class build(_build):
     def run(self):
-        if RELEASE_DIR is None:
+        if not isinstance(info, ReleaseInfo):
             self.execute(_configure_z3, (), msg="Configuring Z3")
             self.execute(_build_z3, (), msg="Building Z3")
         self.execute(_copy_bins, (), msg="Copying binaries")
@@ -270,7 +308,7 @@ if hasattr(platform, 'freedesktop_os_release'):
         pass
 
 if 'bdist_wheel' in sys.argv and '--plat-name' not in sys.argv:
-    if RELEASE_DIR is None:
+    if not isinstance(info, ReleaseInfo):
         name = get_platform()
         if 'linux' in name:
             # linux_* platform tags are disallowed because the python ecosystem is fubar
@@ -288,8 +326,8 @@ if 'bdist_wheel' in sys.argv and '--plat-name' not in sys.argv:
             plat_name = name.replace('.', '_').replace('-', '_')
     else:
         # extract the architecture of the release from the directory name
-        arch = RELEASE_METADATA[1]
-        distos = RELEASE_METADATA[2]
+        arch = info.RELEASE_METADATA[1]
+        distos = info.RELEASE_METADATA[2]
         if distos in ('debian', 'ubuntu'):
             raise Exception(
                 "Linux binary distributions must be built on centos to conform to PEP 513 or alpine if targetting musl"
@@ -310,7 +348,7 @@ if 'bdist_wheel' in sys.argv and '--plat-name' not in sys.argv:
             else:
                 plat_name = 'win32'
         elif distos == 'osx':
-            osver = RELEASE_METADATA[3]
+            osver = info.RELEASE_METADATA[3]
             if osver.count('.') > 1:
                 osver = '.'.join(osver.split('.')[:2])
             if arch == 'x64':
